@@ -13,7 +13,7 @@ async def start(update, context):
 # Команда /id — присылает твой chat_id
 async def get_chat_id(update, context):
     chat_id = update.effective_chat.id
-    await update.message.reply_text(f"Ваш chat_id: `{chat_id}`", parse_mode='Markdown')
+    await update.message.reply_text(f"Ваш chat_id: `{chat_id}`", parse_mode='MARKDOWN_V2')
 
 # Команда /signal — отправка сигнала с кнопками
 async def refresh(update, context):

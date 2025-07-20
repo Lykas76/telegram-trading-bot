@@ -3,6 +3,7 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 TOKEN = os.getenv("TOKEN")
+print(f"TOKEN: {TOKEN}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["M1", "M5", "M15"]]

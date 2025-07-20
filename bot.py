@@ -25,10 +25,13 @@ async def refresh(update, context):
     await send_signal(context)
 
 def main():
+    print("✅ Бот запускается...")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signal", refresh))
+    app.add_handler(CommandHandler("id", get_chat_id))  # 💡 Эта строка отвечает за /id
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()

@@ -30,7 +30,7 @@ async def refresh(update, context):
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("обновить", refresh))
+    app.add_handler(CommandHandler("signal", refresh))
     await app.run_polling()
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 import os
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import aiohttp
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
@@ -14,8 +13,7 @@ async def start(update, context):
     )
 
 async def send_signal(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = YOUR_TELEGRAM_CHAT_ID  # Вставь сюда свой chat_id
-    # Пример сигнала
+    chat_id = YOUR_TELEGRAM_CHAT_ID  # Замените на ваш chat_id
     text = "🔔 Сигнал EUR/USD M1\n🟢 BUY (вверх)\n⏳ Время: 1–3 мин"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 BUY", callback_data='buy')],
@@ -26,11 +24,12 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE):
 async def refresh(update, context):
     await send_signal(context)
 
-async def main():
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signal", refresh))
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+

@@ -1,4 +1,18 @@
 import os
+import os
+import socket
+
+def detect_environment():
+    if "RAILWAY_STATIC_URL" in os.environ or "RAILWAY_ENVIRONMENT" in os.environ:
+        return "🚀 Railway"
+    elif "PYCHARM_HOSTED" in os.environ or "VSCODE_PID" in os.environ:
+        return "💻 IDE"
+    elif socket.gethostname().endswith(".local"):
+        return "💻 Local"
+    else:
+        return "🧭 Unknown"
+
+print(f"🌐 Бот запущен в среде: {detect_environment()}")
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 

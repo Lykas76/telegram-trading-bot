@@ -1,5 +1,6 @@
 import os
 import requests
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
@@ -12,7 +13,6 @@ API_KEY = "TMNLROVN3BTDZUFS"  # Alpha Vantage API
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-# Получение сигнала BUY/SELL
 def get_signal(pair: str, timeframe: str) -> str:
     symbol_map = {
         "EUR/USD": ("EUR", "USD"),
@@ -55,7 +55,6 @@ def get_signal(pair: str, timeframe: str) -> str:
     except Exception as e:
         return f"⚠️ Ошибка получения данных: {e}"
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [[pair] for pair in PAIRS]
@@ -63,11 +62,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Привет! Выбери валютную пару:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
-# Обработка нажатий
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # Выбор валюты
     if text in PAIRS:
         context.user_data["pair"] = text
         keyboard = [[tf] for tf in TIMEFRAMES]
@@ -77,7 +74,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Выбор таймфрейма
     if text in TIMEFRAMES:
         context.user_data["tf"] = text
         keyboard = [["📡 Сигнал", "🔄 Валюта"]]
@@ -87,7 +83,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Кнопка Сигнал
     if text == "📡 Сигнал":
         pair = context.user_data.get("pair")
         tf = context.user_data.get("tf")
@@ -100,7 +95,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
         return
 
-    # Кнопка Сброс валюты
     if text == "🔄 Валюта":
         context.user_data.pop("pair", None)
         context.user_data.pop("tf", None)
@@ -111,16 +105,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Неизвестный текст
     await update.message.reply_text("Выбери действие с клавиатуры.")
 
-# Запуск приложения
-def main():
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("✅ Бот запущен")
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
+

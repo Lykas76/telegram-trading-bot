@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-API_KEY = "8aefd7f6d24d4e99ba317872ce59e00c"
+API_KEY = "dc4ce2bd0a5e4865abcd294f28d55796"
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]

@@ -1,6 +1,9 @@
 import os
 import requests
 import sqlite3
+import pandas as pd
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
@@ -33,7 +36,6 @@ def init_db():
 
 init_db()
 
-# Новая функция для определения времени сделки в зависимости от таймфрейма
 def get_trade_duration(timeframe: str) -> str:
     if timeframe == "M1":
         return "1–3 мин"
@@ -42,9 +44,8 @@ def get_trade_duration(timeframe: str) -> str:
     elif timeframe == "M15":
         return "15–30 мин"
     else:
-        return "1–3 мин"  # По умолчанию
+        return "1–3 мин"
 
-# 📡 Обычный сигнал (по цене)
 def get_signal(pair: str, timeframe: str) -> str:
     symbol_map = {
         "EUR/USD": "EUR/USD",
@@ -84,30 +85,58 @@ def get_signal(pair: str, timeframe: str) -> str:
     except Exception as e:
         return f"⚠️ Ошибка получения данных: {e}"
 
-# 📊 Умный сигнал на основе RSI и MACD с защитой
+# --- Новая функция: загрузка цен и расчет RSI + MACD ---
+def fetch_price_series(symbol: str, interval: str, outputsize=50):
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "apikey": API_KEY,
+        "outputsize": outputsize,
+        "format": "JSON"
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    if "values" not in data:
+        raise Exception(data.get("message", "Ошибка получения данных"))
+
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime")  # по возрастанию времени
+
+    # Приводим к нужным типам
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+
+    return df
+
+def calculate_rsi_macd(df: pd.DataFrame):
+    rsi_indicator = RSIIndicator(close=df["close"], window=14)
+    df["rsi"] = rsi_indicator.rsi()
+
+    macd_indicator = MACD(close=df["close"])
+    df["macd"] = macd_indicator.macd()
+
+    last_rsi = df["rsi"].iloc[-1]
+    last_macd = df["macd"].iloc[-1]
+
+    return last_rsi, last_macd
+
 def get_smart_signal(pair: str, timeframe: str) -> str:
     tf_map = {
         "M1": "1min",
         "M5": "5min",
         "M15": "15min"
     }
-    symbol = pair
-    interval = tf_map[timeframe]
 
-    url_rsi = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval={interval}&apikey={API_KEY}"
-    url_macd = f"https://api.twelvedata.com/macd?symbol={symbol}&interval={interval}&apikey={API_KEY}"
+    symbol = pair
+    interval = tf_map.get(timeframe, "1min")
 
     try:
-        rsi_data = requests.get(url_rsi).json()
-        macd_data = requests.get(url_macd).json()
+        df = fetch_price_series(symbol, interval)
+        rsi, macd = calculate_rsi_macd(df)
 
-        if "values" not in rsi_data or "values" not in macd_data:
-            raise Exception("Недостаточно данных от API")
-
-        rsi = float(rsi_data["values"][0]["rsi"])
-        macd = float(macd_data["values"][0]["macd"])
-
-        # Правила сигнала
         if rsi < 30 and macd > 0:
             signal = "🟢 BUY (вверх)"
         elif rsi > 70 and macd < 0:
@@ -117,7 +146,7 @@ def get_smart_signal(pair: str, timeframe: str) -> str:
 
         duration = get_trade_duration(timeframe)
 
-        # 💾 Сохраняем сигнал в БД
+        # Сохраняем в базу
         conn = sqlite3.connect("signals.db")
         cursor = conn.cursor()
         cursor.execute(
@@ -128,6 +157,7 @@ def get_smart_signal(pair: str, timeframe: str) -> str:
         conn.close()
 
         return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: {duration}"
+
     except Exception as e:
         duration = get_trade_duration(timeframe)
         return f"🤖 Умный сигнал {pair} {timeframe}\n⚠️ Ошибка анализа: {e}\n📊 RSI: 0.0, MACD: 0.0000\n⏳ Время: {duration}"

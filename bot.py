@@ -1,5 +1,6 @@
 import os
 import requests
+import sqlite3
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
@@ -7,67 +8,82 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-API_KEY = "8aefd7f6d24d4e99ba317872ce59e00c"  # Twelve Data API
+API_KEY = "8aefd7f6d24d4e99ba317872ce59e00c"
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-# Получение сигнала BUY/SELL
-
-def get_signal(pair: str, timeframe: str) -> str:
-    symbol_map = {
-        "EUR/USD": "EUR/USD",
-        "GBP/USD": "GBP/USD",
-        "AUD/JPY": "AUD/JPY",
-        "EUR/CAD": "EUR/CAD"
-    }
-
+# --- RSI + MACD умный сигнал ---
+def get_smart_signal(pair: str, timeframe: str) -> dict:
     tf_map = {
         "M1": "1min",
         "M5": "5min",
         "M15": "15min"
     }
-
-    symbol = symbol_map[pair]
-    interval = tf_map[timeframe]
-
-    url = (
-        f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}"
-        f"&apikey={API_KEY}&outputsize=2"
-    )
+    interval = tf_map.get(timeframe, "5min")
+    symbol = pair
 
     try:
-        response = requests.get(url)
-        data = response.json()
+        # RSI
+        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval={interval}&apikey={API_KEY}&outputsize=1"
+        rsi = float(requests.get(rsi_url).json()["values"][0]["rsi"])
 
-        if "values" not in data:
-            raise Exception(data.get("message", "Неизвестная ошибка"))
+        # MACD
+        macd_url = f"https://api.twelvedata.com/macd?symbol={symbol}&interval={interval}&apikey={API_KEY}&outputsize=1"
+        macd_data = requests.get(macd_url).json()["values"][0]
+        macd = float(macd_data["macd"])
+        signal = float(macd_data["signal"])
 
-        latest = data["values"][0]
-        open_price = float(latest["open"])
-        close_price = float(latest["close"])
-
-        if close_price > open_price:
-            return "🟢 BUY (вверх)"
-        elif close_price < open_price:
-            return "🔴 SELL (вниз)"
+        # Интерпретация
+        if rsi < 30 and macd > signal:
+            action = "🟢 BUY (вверх)"
+        elif rsi > 70 and macd < signal:
+            action = "🔴 SELL (вниз)"
         else:
-            return "⚪️ Нейтрально"
+            action = "⚪️ Нет сигнала"
+
+        return {
+            "action": action,
+            "rsi": rsi,
+            "macd": macd,
+            "macd_signal": signal
+        }
+
     except Exception as e:
-        return f"⚠️ Ошибка получения данных: {e}"
+        return {"action": f"⚠️ Ошибка анализа: {e}", "rsi": 0, "macd": 0, "macd_signal": 0}
 
+# --- Сохранение в базу ---
+def save_signal_to_db(pair, tf, rsi, macd, macd_signal, action):
+    conn = sqlite3.connect("signals.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pair TEXT,
+        timeframe TEXT,
+        rsi REAL,
+        macd REAL,
+        signal REAL,
+        action TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute("INSERT INTO signals (pair, timeframe, rsi, macd, signal, action) VALUES (?, ?, ?, ?, ?, ?)",
+              (pair, tf, rsi, macd, macd_signal, action))
+    conn.commit()
+    conn.close()
 
-# Команда /start
+# --- Команда /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [[pair] for pair in PAIRS]
     await update.message.reply_text(
-        "👋 Привет! Выбери валютную пару:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        "👋 Привет! Выбери валютную пару:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
-# Обработка нажатий
+# --- Обработка сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    print(f"👤 chat_id пользователя: {update.effective_chat.id}")  # ← Вывод chat_id
 
     if text in PAIRS:
         context.user_data["pair"] = text
@@ -80,28 +96,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in TIMEFRAMES:
         context.user_data["tf"] = text
-        keyboard = [["\ud83d\udce1 Сигнал", "\ud83d\udd04 Валюта"]]
+        keyboard = [["📡 Сигнал", "📊 Умный сигнал (RSI+MACD)"], ["🔄 Валюта"]]
         await update.message.reply_text(
             f"Выбран таймфрейм: {text}",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return
 
-    if text == "📡 Сигнал":
+    if text == "📊 Умный сигнал (RSI+MACD)":
         pair = context.user_data.get("pair")
         tf = context.user_data.get("tf")
         if pair and tf:
-            signal = get_signal(pair, tf)
+            result = get_smart_signal(pair, tf)
+            save_signal_to_db(pair, tf, result["rsi"], result["macd"], result["macd_signal"], result["action"])
             await update.message.reply_text(
-                f"🔔 Сигнал {pair} {tf}\n{signal}\n⏳ Время: 1–3 мин"
+                f"🤖 Умный сигнал {pair} {tf}\n{result['action']}\n📊 RSI: {result['rsi']:.1f}, MACD: {result['macd']:.4f}\n⏳ Время: 1–3 мин"
             )
         else:
             await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
         return
 
+    if text == "📡 Сигнал":
+        await update.message.reply_text("⚠️ Эта функция пока не подключена.")
+        return
+
     if text == "🔄 Валюта":
-        context.user_data.pop("pair", None)
-        context.user_data.pop("tf", None)
+        context.user_data.clear()
         keyboard = [[pair] for pair in PAIRS]
         await update.message.reply_text(
             "Выбери валютную пару заново:",
@@ -111,13 +131,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Выбери действие с клавиатуры.")
 
-# Запуск приложения
+# --- Запуск бота ---
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    print("\u2705 Бот запущен")
+    print("✅ Бот запущен")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+

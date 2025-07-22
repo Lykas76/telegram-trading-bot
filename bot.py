@@ -33,6 +33,16 @@ def init_db():
 
 init_db()
 
+# Новая функция для определения времени сделки в зависимости от таймфрейма
+def get_trade_duration(timeframe: str) -> str:
+    if timeframe == "M1":
+        return "1–3 мин"
+    elif timeframe == "M5":
+        return "3–5 мин"
+    elif timeframe == "M15":
+        return "15–30 мин"
+    else:
+        return "1–3 мин"  # По умолчанию
 
 # 📡 Обычный сигнал (по цене)
 def get_signal(pair: str, timeframe: str) -> str:
@@ -74,7 +84,6 @@ def get_signal(pair: str, timeframe: str) -> str:
     except Exception as e:
         return f"⚠️ Ошибка получения данных: {e}"
 
-
 # 📊 Умный сигнал на основе RSI и MACD с защитой
 def get_smart_signal(pair: str, timeframe: str) -> str:
     tf_map = {
@@ -106,6 +115,8 @@ def get_smart_signal(pair: str, timeframe: str) -> str:
         else:
             signal = "⚪️ Нейтрально"
 
+        duration = get_trade_duration(timeframe)
+
         # 💾 Сохраняем сигнал в БД
         conn = sqlite3.connect("signals.db")
         cursor = conn.cursor()
@@ -116,10 +127,10 @@ def get_smart_signal(pair: str, timeframe: str) -> str:
         conn.commit()
         conn.close()
 
-        return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: 1–3 мин"
+        return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: {duration}"
     except Exception as e:
-        return f"🤖 Умный сигнал {pair} {timeframe}\n⚠️ Ошибка анализа: {e}\n📊 RSI: 0.0, MACD: 0.0000\n⏳ Время: 1–3 мин"
-
+        duration = get_trade_duration(timeframe)
+        return f"🤖 Умный сигнал {pair} {timeframe}\n⚠️ Ошибка анализа: {e}\n📊 RSI: 0.0, MACD: 0.0000\n⏳ Время: {duration}"
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,7 +140,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Привет! Выбери валютную пару:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
-
 
 # Обработка всех сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,7 +168,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tf = context.user_data.get("tf")
         if pair and tf:
             signal = get_signal(pair, tf)
-            await update.message.reply_text(f"🔔 Сигнал {pair} {tf}\n{signal}\n⏳ Время: 1–3 мин")
+            duration = get_trade_duration(tf)
+            await update.message.reply_text(f"🔔 Сигнал {pair} {tf}\n{signal}\n⏳ Время: {duration}")
         else:
             await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
         return
@@ -185,7 +196,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Выбери действие с клавиатуры.")
 
-
 # Запуск бота
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -193,7 +203,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
     print("✅ Бот запущен")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

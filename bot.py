@@ -13,22 +13,25 @@ API_KEY = "dc4ce2bd0a5e4865abcd294f28d55796"
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-# 💾 Создание базы данных
-conn = sqlite3.connect("signals.db")
-cursor = conn.cursor()
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS smart_signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        pair TEXT,
-        timeframe TEXT,
-        signal TEXT,
-        rsi REAL,
-        macd REAL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-""")
-conn.commit()
-conn.close()
+# 💾 Создание базы данных (один раз при старте)
+def init_db():
+    conn = sqlite3.connect("signals.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS smart_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT,
+            timeframe TEXT,
+            signal TEXT,
+            rsi REAL,
+            macd REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 
 # 📡 Обычный сигнал (по цене)
@@ -72,7 +75,7 @@ def get_signal(pair: str, timeframe: str) -> str:
         return f"⚠️ Ошибка получения данных: {e}"
 
 
-# 📊 Умный сигнал на основе RSI и MACD
+# 📊 Умный сигнал на основе RSI и MACD с защитой
 def get_smart_signal(pair: str, timeframe: str) -> str:
     tf_map = {
         "M1": "1min",
@@ -88,6 +91,9 @@ def get_smart_signal(pair: str, timeframe: str) -> str:
     try:
         rsi_data = requests.get(url_rsi).json()
         macd_data = requests.get(url_macd).json()
+
+        if "values" not in rsi_data or "values" not in macd_data:
+            raise Exception("Недостаточно данных от API")
 
         rsi = float(rsi_data["values"][0]["rsi"])
         macd = float(macd_data["values"][0]["macd"])

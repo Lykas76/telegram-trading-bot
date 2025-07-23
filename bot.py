@@ -98,10 +98,10 @@ def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf="
         df.tail(50),
         type='candle',
         mav=(9,21),
-        volume=True,
-        style='charles',
-        title=title,
-        savefig=filename
+        volume="volume" in df.columns,  # динамически
+    ...
+)
+
     )
 
 async def send_smart_signal(app, chat_id, pair, timeframe):

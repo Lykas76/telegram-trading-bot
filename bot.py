@@ -66,12 +66,8 @@ def fetch_price_series(symbol: str, interval: str, outputsize=50):
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
-    for col in ["open", "high", "low", "close"]:
+    for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    if "volume" in df.columns:
-        df["volume"] = df["volume"].astype(float)
-    else:
-        df["volume"] = 0
     return df
 
 def calculate_rsi_macd(df: pd.DataFrame):
@@ -98,12 +94,20 @@ def determine_signal_strength(rsi, macd):
 def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf=""):
     date_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     title = f"{pair} {tf} • {date_str} UTC"
-    has_volume = "volume" in df.columns and df["volume"].sum() > 0
+
+    use_volume = False
+    if "volume" in df.columns:
+        try:
+            total_volume = df["volume"].astype(float).sum()
+            use_volume = total_volume > 0
+        except:
+            use_volume = False
+
     mpf.plot(
         df.tail(50),
         type='candle',
         mav=(9, 21),
-        volume=has_volume,
+        volume=use_volume,
         title=title,
         style='yahoo',
         savefig=filename
@@ -130,9 +134,12 @@ async def send_smart_signal(app, chat_id, pair, timeframe):
         draw_candlestick_chart(df, pair=pair, tf=timeframe)
 
         message = (
-            f"📡 Умный сигнал {pair} {timeframe}\n"
-            f"{signal} — {strength}\n"
-            f"📊 RSI: {rsi:.2f} | MACD: {macd:.4f}\n"
+            f"📡 Умный сигнал {pair} {timeframe}
+"
+            f"{signal} — {strength}
+"
+            f"📊 RSI: {rsi:.2f} | MACD: {macd:.4f}
+"
             f"⏳ Время: {duration}"
         )
         button = InlineKeyboardMarkup.from_button(
@@ -200,4 +207,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

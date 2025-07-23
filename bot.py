@@ -9,6 +9,7 @@ from ta.trend import MACD
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -18,7 +19,7 @@ API_KEY = "dc4ce2bd0a5e4865abcd294f28d55796"
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-active_chats = set()  # для автообновления
+active_chats = set()
 
 def init_db():
     conn = sqlite3.connect("signals.db")
@@ -90,8 +91,18 @@ def determine_signal_strength(rsi, macd):
     else:
         return "СЛАБЫЙ", "⚪️ Нейтрально"
 
-def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png"):
-    mpf.plot(df.tail(50), type='candle', mav=(9,21), volume=True, style='charles', savefig=filename)
+def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf=""):
+    date_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    title = f"{pair} {tf} • {date_str} UTC"
+    mpf.plot(
+        df.tail(50),
+        type='candle',
+        mav=(9,21),
+        volume=True,
+        style='charles',
+        title=title,
+        savefig=filename
+    )
 
 async def send_smart_signal(app, chat_id, pair, timeframe):
     tf_map = {"M1": "1min", "M5": "5min", "M15": "15min"}
@@ -102,7 +113,6 @@ async def send_smart_signal(app, chat_id, pair, timeframe):
         strength, signal = determine_signal_strength(rsi, macd)
         duration = get_trade_duration(strength)
 
-        # Сохраняем сигнал в БД
         conn = sqlite3.connect("signals.db")
         cursor = conn.cursor()
         cursor.execute(
@@ -112,14 +122,13 @@ async def send_smart_signal(app, chat_id, pair, timeframe):
         conn.commit()
         conn.close()
 
-        # Строим график
-        draw_candlestick_chart(df)
+        draw_candlestick_chart(df, pair=pair, tf=timeframe)
 
         message = (
-            f"🔔 Сигнал {pair} {timeframe}\n"
+            f"📡 Умный сигнал {pair} {timeframe}\n"
             f"{signal} — {strength}\n"
             f"📊 RSI: {rsi:.2f} | MACD: {macd:.4f}\n"
-            f"🕒 Время сделки: {duration}"
+            f"⏳ Время: {duration}"
         )
         button = InlineKeyboardMarkup.from_button(
             InlineKeyboardButton("BUY" if "BUY" in signal else "SELL", callback_data="none")
@@ -132,19 +141,18 @@ async def send_smart_signal(app, chat_id, pair, timeframe):
 async def auto_update_signals(app):
     while True:
         if not active_chats:
-            await asyncio.sleep(60)  # Нет активных пользователей — ждём
+            await asyncio.sleep(60)
             continue
         for chat_id in active_chats:
-            # Для простоты используем EUR/USD M1
             await send_smart_signal(app, chat_id, "EUR/USD", "M1")
-            await asyncio.sleep(1)  # небольшая пауза между пользователями
-        await asyncio.sleep(300)  # ждем 5 минут перед следующим циклом
+            await asyncio.sleep(1)
+        await asyncio.sleep(300)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [[pair] for pair in PAIRS]
     await update.message.reply_text("👋 Привет! Выбери валютную пару:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-    active_chats.add(update.effective_chat.id)  # добавляем пользователя для автообновления
+    active_chats.add(update.effective_chat.id)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -158,15 +166,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [["📡 Сигнал", "🔄 Валюта", "📊 Умный сигнал (RSI+MACD)"]]
         await update.message.reply_text(f"Выбран таймфрейм: {text}", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
         return
-    if text == "📡 Сигнал":
-        pair = context.user_data.get("pair")
-        tf = context.user_data.get("tf")
-        if pair and tf:
-            await send_smart_signal(context.application, update.effective_chat.id, pair, tf)
-        else:
-            await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
-        return
-    if text == "📊 Умный сигнал (RSI+MACD)":
+    if text in ["📡 Сигнал", "📊 Умный сигнал (RSI+MACD)"]:
         pair = context.user_data.get("pair")
         tf = context.user_data.get("tf")
         if pair and tf:

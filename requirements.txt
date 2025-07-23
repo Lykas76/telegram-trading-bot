@@ -4,5 +4,6 @@ python-dotenv
 pandas
 requests
 ta
+mplfinance
 
 

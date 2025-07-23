@@ -66,8 +66,12 @@ def fetch_price_series(symbol: str, interval: str, outputsize=50):
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
-    for col in ["open", "high", "low", "close", "volume"]:
+    for col in ["open", "high", "low", "close"]:
         df[col] = df[col].astype(float)
+    if "volume" in df.columns:
+        df["volume"] = df["volume"].astype(float)
+    else:
+        df["volume"] = 0
     return df
 
 def calculate_rsi_macd(df: pd.DataFrame):
@@ -94,14 +98,15 @@ def determine_signal_strength(rsi, macd):
 def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf=""):
     date_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     title = f"{pair} {tf} • {date_str} UTC"
+    has_volume = "volume" in df.columns and df["volume"].sum() > 0
     mpf.plot(
         df.tail(50),
         type='candle',
-        mav=(9,21),
-        volume="volume" in df.columns,  # динамически
-    ...
-)
-
+        mav=(9, 21),
+        volume=has_volume,
+        title=title,
+        style='yahoo',
+        savefig=filename
     )
 
 async def send_smart_signal(app, chat_id, pair, timeframe):
@@ -195,3 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

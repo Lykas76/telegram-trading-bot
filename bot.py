@@ -1,213 +1,144 @@
 import os
+import logging
 import requests
 import sqlite3
 import pandas as pd
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import mplfinance as mpf
 from dotenv import load_dotenv
+from telegram import Update, ReplyKeyboardMarkup, InputFile
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Загрузка переменных среды
 load_dotenv()
-
 TOKEN = os.getenv("TOKEN")
-API_KEY = "dc4ce2bd0a5e4865abcd294f28d55796"
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-# Создание базы данных (один раз при старте)
-def init_db():
-    conn = sqlite3.connect("signals.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS smart_signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pair TEXT,
-            timeframe TEXT,
-            signal TEXT,
-            rsi REAL,
-            macd REAL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def get_trade_duration(timeframe: str) -> str:
-    if timeframe == "M1":
-        return "1–3 мин"
-    elif timeframe == "M5":
-        return "3–5 мин"
-    elif timeframe == "M15":
-        return "15–30 мин"
-    else:
-        return "1–3 мин"
-
-def get_signal(pair: str, timeframe: str) -> str:
-    symbol_map = {
-        "EUR/USD": "EUR/USD",
-        "GBP/USD": "GBP/USD",
-        "AUD/JPY": "AUD/JPY",
-        "EUR/CAD": "EUR/CAD"
-    }
-    tf_map = {
+def fetch_price_series_alpha_vantage(symbol: str, interval: str, outputsize=50):
+    interval_map = {
         "M1": "1min",
         "M5": "5min",
         "M15": "15min"
     }
-    symbol = symbol_map[pair]
-    interval = tf_map[timeframe]
-
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={API_KEY}&outputsize=2"
-
-    try:
-        response = requests.get(url)
-        data = response.json()
-        if "values" not in data:
-            raise Exception(data.get("message", "Неизвестная ошибка"))
-        latest = data["values"][0]
-        open_price = float(latest["open"])
-        close_price = float(latest["close"])
-        if close_price > open_price:
-            return "🟢 BUY (вверх)"
-        elif close_price < open_price:
-            return "🔴 SELL (вниз)"
-        else:
-            return "⚪️ Нейтрально"
-    except Exception as e:
-        return f"⚠️ Ошибка получения данных: {e}"
-
-# Получение ценовой серии для расчёта индикаторов
-def fetch_price_series(symbol: str, interval: str, outputsize=50):
-    url = "https://api.twelvedata.com/time_series"
+    selected_interval = interval_map.get(interval, "1min")
+    url = "https://www.alphavantage.co/query"
     params = {
+        "function": "TIME_SERIES_INTRADAY",
         "symbol": symbol,
-        "interval": interval,
-        "apikey": API_KEY,
-        "outputsize": outputsize,
-        "format": "JSON"
+        "interval": selected_interval,
+        "apikey": ALPHA_VANTAGE_KEY,
+        "outputsize": "compact"
     }
     response = requests.get(url, params=params)
     data = response.json()
-    if "values" not in data:
-        raise Exception(data.get("message", "Ошибка получения данных"))
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.sort_values("datetime")  # сортируем по времени возрастания
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
+    key = f"Time Series ({selected_interval})"
+    if key not in data:
+        raise Exception(f"Ошибка API Alpha Vantage: {data.get('Note') or data.get('Error Message') or 'нет данных'}")
+    df = pd.DataFrame.from_dict(data[key], orient="index")
+    df = df.rename(columns={
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close",
+        "5. volume": "volume"
+    })
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    df = df.astype(float)
     return df
 
-# Расчет RSI и MACD на данных DataFrame
-def calculate_rsi_macd(df: pd.DataFrame):
-    rsi_indicator = RSIIndicator(close=df["close"], window=14)
-    df["rsi"] = rsi_indicator.rsi()
-    macd_indicator = MACD(close=df["close"])
-    df["macd"] = macd_indicator.macd()
-    last_rsi = df["rsi"].iloc[-1]
-    last_macd = df["macd"].iloc[-1]
-    return last_rsi, last_macd
+def calculate_rsi_macd(df):
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
 
-def get_smart_signal(pair: str, timeframe: str) -> str:
-    tf_map = {
-        "M1": "1min",
-        "M5": "5min",
-        "M15": "15min"
-    }
-    symbol = pair
-    interval = tf_map.get(timeframe, "1min")
-    try:
-        df = fetch_price_series(symbol, interval)
-        rsi, macd = calculate_rsi_macd(df)
-        if rsi < 30 and macd > 0:
-            signal = "🟢 BUY (вверх)"
-        elif rsi > 70 and macd < 0:
-            signal = "🔴 SELL (вниз)"
-        else:
-            signal = "⚪️ Нейтрально"
-        duration = get_trade_duration(timeframe)
-        # Сохраняем сигнал в базу
-        conn = sqlite3.connect("signals.db")
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO smart_signals (pair, timeframe, signal, rsi, macd) VALUES (?, ?, ?, ?, ?)",
-            (pair, timeframe, signal, rsi, macd)
-        )
-        conn.commit()
-        conn.close()
-        return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: {duration}"
-    except Exception as e:
-        duration = get_trade_duration(timeframe)
-        return f"🤖 Умный сигнал {pair} {timeframe}\n⚠️ Ошибка анализа: {e}\n📊 RSI: 0.0, MACD: 0.0000\n⏳ Время: {duration}"
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
 
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    keyboard = [[pair] for pair in PAIRS]
-    await update.message.reply_text(
-        "👋 Привет! Выбери валютную пару:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return rsi.iloc[-1], macd.iloc[-1]
+
+def determine_signal_strength(rsi, macd):
+    if rsi < 30 and macd > 0:
+        return "🟢 BUY (вверх)", "📈"
+    elif rsi > 70 and macd < 0:
+        return "🔴 SELL (вниз)", "📉"
+    else:
+        return "⚪️ Нет сигнала", "➖"
+
+def get_trade_duration(strength):
+    if "BUY" in strength or "SELL" in strength:
+        return "1–3 мин"
+    return "Подождите"
+
+def draw_candlestick_chart(df, filename="chart.png", pair="PAIR", tf="M1"):
+    mpf.plot(
+        df.tail(30),
+        type='candle',
+        style='charles',
+        title=f"{pair} {tf}",
+        ylabel='Цена',
+        savefig=dict(fname=filename, dpi=100)
     )
 
-# Обработка всех сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text in PAIRS:
-        context.user_data["pair"] = text
-        keyboard = [[tf] for tf in TIMEFRAMES]
-        await update.message.reply_text(
-            f"Выбрана пара: {text}\nТеперь выбери таймфрейм:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-    if text in TIMEFRAMES:
-        context.user_data["tf"] = text
-        keyboard = [["📡 Сигнал", "🔄 Валюта", "📊 Умный сигнал (RSI+MACD)"]]
-        await update.message.reply_text(
-            f"Выбран таймфрейм: {text}",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-    if text == "📡 Сигнал":
-        pair = context.user_data.get("pair")
-        tf = context.user_data.get("tf")
-        if pair and tf:
-            signal = get_signal(pair, tf)
-            duration = get_trade_duration(tf)
-            await update.message.reply_text(f"🔔 Сигнал {pair} {tf}\n{signal}\n⏳ Время: {duration}")
-        else:
-            await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
-        return
-    if text == "📊 Умный сигнал (RSI+MACD)":
-        pair = context.user_data.get("pair")
-        tf = context.user_data.get("tf")
-        if pair and tf:
-            signal = get_smart_signal(pair, tf)
-            await update.message.reply_text(signal)
-        else:
-            await update.message.reply_text("Сначала выбери валюту и таймфрейм.")
-        return
-    if text == "🔄 Валюта":
-        context.user_data.pop("pair", None)
-        context.user_data.pop("tf", None)
-        keyboard = [[pair] for pair in PAIRS]
-        await update.message.reply_text(
-            "Выбери валютную пару заново:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-    await update.message.reply_text("Выбери действие с клавиатуры.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[pair] for pair in PAIRS]
+    await update.message.reply_text("👋 Привет! Выбери валютную пару:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
 
-# Запуск бота
+async def handle_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pair = update.message.text
+    context.user_data['pair'] = pair
+    keyboard = [[tf] for tf in TIMEFRAMES]
+    await update.message.reply_text("⏱ Выбери таймфрейм:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+
+async def handle_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    timeframe = update.message.text
+    context.user_data['timeframe'] = timeframe
+    keyboard = [["📊 Умный сигнал (RSI+MACD)"]]
+    await update.message.reply_text("✅ Нажми кнопку, чтобы получить сигнал:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+
+async def handle_smart_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pair = context.user_data.get("pair", "EUR/USD")
+    timeframe = context.user_data.get("timeframe", "M1")
+    symbol = pair.replace("/", "")
+    try:
+        df = fetch_price_series_alpha_vantage(symbol, timeframe)
+        rsi, macd = calculate_rsi_macd(df)
+        strength, icon = determine_signal_strength(rsi, macd)
+        duration = get_trade_duration(strength)
+
+        draw_candlestick_chart(df, filename="chart.png", pair=pair, tf=timeframe)
+
+        with open("chart.png", "rb") as photo:
+            await update.message.reply_photo(
+                photo=InputFile(photo),
+                caption=f"🤖 Умный сигнал {pair} {timeframe}\n{icon} {strength}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: {duration}"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка анализа: {e}")
+
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    print("✅ Бот запущен")
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_pair))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(M1|M5|M15)$"), handle_timeframe))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📊 Умный сигнал.*"), handle_smart_signal))
+
+    print("Бот запущен")
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

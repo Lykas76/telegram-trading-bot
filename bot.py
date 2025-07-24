@@ -1,145 +1,173 @@
 import os
+import sqlite3
 import asyncio
 import logging
 import requests
-import sqlite3
-import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-
+from io import BytesIO
+from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackContext, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram import Update, ReplyKeyboardMarkup, InputFile
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters
+)
 
-# Load environment variables
 load_dotenv()
+
 TOKEN = os.getenv("TOKEN")
+API_KEY = os.getenv("API_KEY")  # Twelve Data
+ALPHA_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
+
+PAIR = "EUR/USD"
+DB_FILE = "signals.db"
+TIMEFRAMES = ["M1", "M5", "M15"]
 
 logging.basicConfig(level=logging.INFO)
-app_flask = Flask(__name__)
-bot = Bot(token=TOKEN)
 
-DB_FILE = "signals.db"
-if not os.path.exists(DB_FILE):
+# --- Database Setup ---
+def create_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE signals (
+        CREATE TABLE IF NOT EXISTS smart_signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pair TEXT,
             timeframe TEXT,
-            signal_type TEXT,
+            signal TEXT,
+            rsi REAL,
+            macd REAL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
-PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
-TIMEFRAMES = ["M1", "M5", "M15"]
+create_db()
 
-# Utils
-async def fetch_twelve_data(pair, timeframe):
+# --- Signal Logic ---
+def get_price_data(pair, interval):
     symbol = pair.replace("/", "")
-    interval = timeframe.lower()
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={TWELVE_DATA_KEY}&outputsize=50"
-    response = requests.get(url)
-    data = response.json()
-    return pd.DataFrame(data['values']) if 'values' in data else None
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval.lower()}&apikey={API_KEY}&outputsize=30"
+    response = requests.get(url).json()
+    candles = response.get("values", [])
+    if not candles:
+        return []
+    return list(reversed(candles))
 
-def fetch_alpha_vantage_data(pair, interval):
+def get_alpha_data(pair, interval):
     symbol = pair.replace("/", "")
-    function = "TIME_SERIES_INTRADAY"
-    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&interval={interval}&apikey={ALPHA_VANTAGE_KEY}&outputsize=compact"
-    r = requests.get(url)
-    data = r.json()
-    key = f"Time Series ({interval})"
-    if key in data:
-        df = pd.DataFrame.from_dict(data[key], orient='index')
-        df.columns = ['open', 'high', 'low', 'close', 'volume']
-        df = df.astype(float)
-        return df.iloc[::-1]
-    return None
+    func = "TIME_SERIES_INTRADAY"
+    url = f"https://www.alphavantage.co/query?function={func}&symbol={symbol}&interval={interval.lower()}&apikey={ALPHA_KEY}&outputsize=compact"
+    response = requests.get(url).json()
+    data = response.get(f"Time Series ({interval})", {})
+    candles = []
+    for time, values in sorted(data.items())[-30:]:
+        candles.append({
+            "datetime": time,
+            "open": values["1. open"],
+            "high": values["2. high"],
+            "low": values["3. low"],
+            "close": values["4. close"],
+            "volume": values.get("5. volume", "0")
+        })
+    return candles
 
-def calculate_rsi(df, period=14):
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+def calculate_rsi(prices):
+    if len(prices) < 14:
+        return 0.0
+    gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices))]
+    losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices))]
+    avg_gain = sum(gains) / 14
+    avg_loss = sum(losses) / 14
+    if avg_loss == 0:
+        return 100.0
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return round(100 - (100 / (1 + rs)), 2)
 
-def calculate_macd(df):
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    return macd
+def calculate_macd(prices):
+    def ema(values, period):
+        k = 2 / (period + 1)
+        ema_values = [sum(values[:period]) / period]
+        for price in values[period:]:
+            ema_values.append(price * k + ema_values[-1] * (1 - k))
+        return ema_values
 
-def save_signal(pair, timeframe, signal_type):
+    if len(prices) < 26:
+        return 0.0
+    ema12 = ema(prices, 12)
+    ema26 = ema(prices, 26)
+    macd = [a - b for a, b in zip(ema12[-len(ema26):], ema26)]
+    return round(macd[-1], 4) if macd else 0.0
+
+def generate_signal(rsi, macd):
+    if rsi < 30 and macd > 0:
+        return "BUY"
+    elif rsi > 70 and macd < 0:
+        return "SELL"
+    return "HOLD"
+
+def save_smart_signal(pair, timeframe, signal, rsi, macd):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO signals (pair, timeframe, signal_type) VALUES (?, ?, ?)", (pair, timeframe, signal_type))
+    cursor.execute("""
+        INSERT INTO smart_signals (pair, timeframe, signal, rsi, macd)
+        VALUES (?, ?, ?, ?, ?)
+    """, (pair, timeframe, signal, rsi, macd))
     conn.commit()
     conn.close()
 
-async def smart_signal(pair, timeframe):
-    interval_map = {"M1": "1min", "M5": "5min", "M15": "15min"}
-    df = fetch_alpha_vantage_data(pair, interval_map[timeframe])
-    if df is None or 'volume' not in df:
-        return "⚠️ Ошибка анализа: 'volume'"
-
-    df['rsi'] = calculate_rsi(df)
-    df['macd'] = calculate_macd(df)
-    rsi = df['rsi'].iloc[-1]
-    macd = df['macd'].iloc[-1]
-
-    if rsi < 30 and macd > 0:
-        signal = "🟢 BUY (вверх)"
-    elif rsi > 70 and macd < 0:
-        signal = "🔴 SELL (вниз)"
-    else:
-        signal = "⚠️ Нет сигнала"
-
-    save_signal(pair, timeframe, signal)
-    return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {round(rsi, 2)}, MACD: {round(macd, 4)}\n⏳ Время: 1–3 мин"
-
-# Telegram Handlers
+# --- Telegram Bot ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = [[InlineKeyboardButton(tf, callback_data=tf)] for tf in TIMEFRAMES]
-    await update.message.reply_text("Выберите таймфрейм:", reply_markup=InlineKeyboardMarkup(buttons))
+    keyboard = [["M1", "M5", "M15"]]
+    await update.message.reply_text("👋 Привет! Выбери таймфрейм:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    timeframe = query.data
-    pair = "EUR/USD"
-    msg = await smart_signal(pair, timeframe)
-    await query.edit_message_text(text=msg)
+async def choose_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['timeframe'] = update.message.text
+    keyboard = [["📡 Сигнал"], ["📊 Умный сигнал"]]
+    await update.message.reply_text(f"Выбран таймфрейм {update.message.text}. Выбери действие:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-# Flask Webhook
-@app_flask.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
-    return "ok"
+async def send_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tf = context.user_data.get("timeframe", "M1")
+    candles = get_price_data(PAIR, tf)
+    if not candles:
+        await update.message.reply_text("⚠️ Ошибка получения данных!")
+        return
+    signal = "BUY" if float(candles[-1]['close']) > float(candles[-2]['close']) else "SELL"
+    text = f"🔔 Сигнал {PAIR} {tf}\n{'🟢' if signal=='BUY' else '🔴'} {signal} (по цене)\n⏳ Время: 1–3 мин"
+    await update.message.reply_text(text)
+
+async def send_smart_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tf = context.user_data.get("timeframe", "M1")
+    interval_map = {"M1": "1min", "M5": "5min", "M15": "15min"}
+    candles = get_alpha_data(PAIR, interval_map[tf])
+    if not candles:
+        await update.message.reply_text("⚠️ Ошибка анализа данных!")
+        return
+
+    closes = [float(c["close"]) for c in candles]
+    rsi = calculate_rsi(closes)
+    macd = calculate_macd(closes)
+    signal = generate_signal(rsi, macd)
+    save_smart_signal(PAIR, tf, signal, rsi, macd)
+
+    text = f"🤖 Умный сигнал {PAIR} {tf}\n{'🟢' if signal=='BUY' else '🔴' if signal=='SELL' else '⚪️'} {signal}\n📊 RSI: {rsi}, MACD: {macd}\n⏳ Время: 1–3 мин"
+    await update.message.reply_text(text)
 
 async def run_bot():
-    global application
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("^(M1|M5|M15)$"), choose_timeframe))
+    app.add_handler(MessageHandler(filters.Regex("^📡 Сигнал$"), send_signal))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Умный сигнал$"), send_smart_signal))
 
-    await application.initialize()
-    await application.start()
-    await application.bot.set_webhook(url=WEBHOOK_URL + "/webhook")
-    await application.updater.start_polling()
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        webhook_url=WEBHOOK_URL + "/webhook"
+    )
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(run_bot())
-    app_flask.run(host="0.0.0.0", port=8080)
-

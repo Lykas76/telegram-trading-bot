@@ -62,7 +62,7 @@ def fetch_price_series(symbol: str, interval: str, outputsize=50):
     }
     df = pd.read_json(url, params=params)['values']
     df = pd.DataFrame(df)
-    df = df.iloc[::-1]  # переворачиваем, чтобы были по времени
+    df = df.iloc[::-1]
     df.columns = df.columns.str.lower()
     for col in ["open", "high", "low", "close"]:
         df[col] = df[col].astype(float)
@@ -180,9 +180,13 @@ def telegram_app():
 if __name__ == "__main__":
     init_db()
     app = telegram_app()
-    asyncio.run(auto_update_signals(app))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
-        webhook_url=WEBHOOK_URL + "/webhook"
-    )
+
+    async def run_bot():
+        asyncio.create_task(auto_update_signals(app))
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 8000)),
+            webhook_url=WEBHOOK_URL + "/webhook"
+        )
+
+    asyncio.run(run_bot())

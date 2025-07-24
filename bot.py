@@ -1,144 +1,145 @@
 import os
+import asyncio
 import logging
 import requests
 import sqlite3
 import pandas as pd
+import matplotlib.pyplot as plt
 import mplfinance as mpf
-from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Загрузка переменных среды
+from dotenv import load_dotenv
+from flask import Flask, request
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackContext, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+
+# Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
+app_flask = Flask(__name__)
+bot = Bot(token=TOKEN)
+
+DB_FILE = "signals.db"
+if not os.path.exists(DB_FILE):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT,
+            timeframe TEXT,
+            signal_type TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 
-def fetch_price_series_alpha_vantage(symbol: str, interval: str, outputsize=50):
-    interval_map = {
-        "M1": "1min",
-        "M5": "5min",
-        "M15": "15min"
-    }
-    selected_interval = interval_map.get(interval, "1min")
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": symbol,
-        "interval": selected_interval,
-        "apikey": ALPHA_VANTAGE_KEY,
-        "outputsize": "compact"
-    }
-    response = requests.get(url, params=params)
+# Utils
+async def fetch_twelve_data(pair, timeframe):
+    symbol = pair.replace("/", "")
+    interval = timeframe.lower()
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={TWELVE_DATA_KEY}&outputsize=50"
+    response = requests.get(url)
     data = response.json()
-    key = f"Time Series ({selected_interval})"
-    if key not in data:
-        raise Exception(f"Ошибка API Alpha Vantage: {data.get('Note') or data.get('Error Message') or 'нет данных'}")
-    df = pd.DataFrame.from_dict(data[key], orient="index")
-    df = df.rename(columns={
-        "1. open": "open",
-        "2. high": "high",
-        "3. low": "low",
-        "4. close": "close",
-        "5. volume": "volume"
-    })
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-    df = df.astype(float)
-    return df
+    return pd.DataFrame(data['values']) if 'values' in data else None
 
-def calculate_rsi_macd(df):
+def fetch_alpha_vantage_data(pair, interval):
+    symbol = pair.replace("/", "")
+    function = "TIME_SERIES_INTRADAY"
+    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&interval={interval}&apikey={ALPHA_VANTAGE_KEY}&outputsize=compact"
+    r = requests.get(url)
+    data = r.json()
+    key = f"Time Series ({interval})"
+    if key in data:
+        df = pd.DataFrame.from_dict(data[key], orient='index')
+        df.columns = ['open', 'high', 'low', 'close', 'volume']
+        df = df.astype(float)
+        return df.iloc[::-1]
+    return None
+
+def calculate_rsi(df, period=14):
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
-    loss = -1 * delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + rs))
 
+def calculate_macd(df):
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     macd = exp1 - exp2
+    return macd
 
-    return rsi.iloc[-1], macd.iloc[-1]
+def save_signal(pair, timeframe, signal_type):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO signals (pair, timeframe, signal_type) VALUES (?, ?, ?)", (pair, timeframe, signal_type))
+    conn.commit()
+    conn.close()
 
-def determine_signal_strength(rsi, macd):
+async def smart_signal(pair, timeframe):
+    interval_map = {"M1": "1min", "M5": "5min", "M15": "15min"}
+    df = fetch_alpha_vantage_data(pair, interval_map[timeframe])
+    if df is None or 'volume' not in df:
+        return "⚠️ Ошибка анализа: 'volume'"
+
+    df['rsi'] = calculate_rsi(df)
+    df['macd'] = calculate_macd(df)
+    rsi = df['rsi'].iloc[-1]
+    macd = df['macd'].iloc[-1]
+
     if rsi < 30 and macd > 0:
-        return "🟢 BUY (вверх)", "📈"
+        signal = "🟢 BUY (вверх)"
     elif rsi > 70 and macd < 0:
-        return "🔴 SELL (вниз)", "📉"
+        signal = "🔴 SELL (вниз)"
     else:
-        return "⚪️ Нет сигнала", "➖"
+        signal = "⚠️ Нет сигнала"
 
-def get_trade_duration(strength):
-    if "BUY" in strength or "SELL" in strength:
-        return "1–3 мин"
-    return "Подождите"
+    save_signal(pair, timeframe, signal)
+    return f"🤖 Умный сигнал {pair} {timeframe}\n{signal}\n📊 RSI: {round(rsi, 2)}, MACD: {round(macd, 4)}\n⏳ Время: 1–3 мин"
 
-def draw_candlestick_chart(df, filename="chart.png", pair="PAIR", tf="M1"):
-    mpf.plot(
-        df.tail(30),
-        type='candle',
-        style='charles',
-        title=f"{pair} {tf}",
-        ylabel='Цена',
-        savefig=dict(fname=filename, dpi=100)
-    )
-
+# Telegram Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[pair] for pair in PAIRS]
-    await update.message.reply_text("👋 Привет! Выбери валютную пару:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    buttons = [[InlineKeyboardButton(tf, callback_data=tf)] for tf in TIMEFRAMES]
+    await update.message.reply_text("Выберите таймфрейм:", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def handle_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pair = update.message.text
-    context.user_data['pair'] = pair
-    keyboard = [[tf] for tf in TIMEFRAMES]
-    await update.message.reply_text("⏱ Выбери таймфрейм:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    timeframe = query.data
+    pair = "EUR/USD"
+    msg = await smart_signal(pair, timeframe)
+    await query.edit_message_text(text=msg)
 
-async def handle_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    timeframe = update.message.text
-    context.user_data['timeframe'] = timeframe
-    keyboard = [["📊 Умный сигнал (RSI+MACD)"]]
-    await update.message.reply_text("✅ Нажми кнопку, чтобы получить сигнал:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+# Flask Webhook
+@app_flask.route("/webhook", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.run(application.process_update(update))
+    return "ok"
 
-async def handle_smart_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pair = context.user_data.get("pair", "EUR/USD")
-    timeframe = context.user_data.get("timeframe", "M1")
-    symbol = pair.replace("/", "")
-    try:
-        df = fetch_price_series_alpha_vantage(symbol, timeframe)
-        rsi, macd = calculate_rsi_macd(df)
-        strength, icon = determine_signal_strength(rsi, macd)
-        duration = get_trade_duration(strength)
+async def run_bot():
+    global application
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
 
-        draw_candlestick_chart(df, filename="chart.png", pair=pair, tf=timeframe)
+    await application.initialize()
+    await application.start()
+    await application.bot.set_webhook(url=WEBHOOK_URL + "/webhook")
+    await application.updater.start_polling()
 
-        with open("chart.png", "rb") as photo:
-            await update.message.reply_photo(
-                photo=InputFile(photo),
-                caption=f"🤖 Умный сигнал {pair} {timeframe}\n{icon} {strength}\n📊 RSI: {rsi:.2f}, MACD: {macd:.4f}\n⏳ Время: {duration}"
-            )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка анализа: {e}")
+if __name__ == "__main__":
+    asyncio.run(run_bot())
+    app_flask.run(host="0.0.0.0", port=8080)
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_pair))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(M1|M5|M15)$"), handle_timeframe))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📊 Умный сигнал.*"), handle_smart_signal))
-
-    print("Бот запущен")
-    app.run_polling()
-
-if __name__ == '__main__':
-    main()

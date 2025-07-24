@@ -15,14 +15,16 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 API_KEY = os.getenv("API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://your-app.up.railway.app
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+if not WEBHOOK_URL:
+    raise ValueError("❌ Переменная окружения WEBHOOK_URL не установлена. Проверь .env файл или настройки Railway")
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
 active_chats = set()
 
 app_flask = Flask(__name__)
-
 
 def init_db():
     conn = sqlite3.connect("signals.db")
@@ -41,13 +43,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def get_trade_duration(strength: str) -> str:
-    return {
-        "СИЛЬНЫЙ": "3–5 минут",
-        "СРЕДНИЙ": "1–3 минуты"
-    }.get(strength, "1 минута")
-
+    if strength == "СИЛЬНЫЙ":
+        return "3–5 минут"
+    elif strength == "СРЕДНИЙ":
+        return "1–3 минут"
+    else:
+        return "1 минута"
 
 def fetch_price_series(symbol: str, interval: str, outputsize=50):
     url = "https://api.twelvedata.com/time_series"
@@ -66,12 +68,10 @@ def fetch_price_series(symbol: str, interval: str, outputsize=50):
         df[col] = df[col].astype(float)
     return df
 
-
 def calculate_rsi_macd(df: pd.DataFrame):
     rsi = RSIIndicator(close=df["close"], window=14).rsi().iloc[-1]
     macd = MACD(close=df["close"]).macd().iloc[-1]
     return rsi, macd
-
 
 def determine_signal_strength(rsi, macd):
     if rsi < 25 and macd > 0:
@@ -82,7 +82,6 @@ def determine_signal_strength(rsi, macd):
         return "СРЕДНИЙ", "🟡 Внимание"
     else:
         return "СЛАБЫЙ", "⚪️ Нейтрально"
-
 
 def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf=""):
     title = f"{pair} {tf} • {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
@@ -96,20 +95,16 @@ def draw_candlestick_chart(df: pd.DataFrame, filename="chart.png", pair="", tf="
         savefig=filename
     )
 
-
 async def send_smart_signal(app, chat_id, pair, timeframe):
     tf_map = {"M1": "1min", "M5": "5min", "M15": "15min"}
     interval = tf_map.get(timeframe, "1min")
-
     try:
         symbol = pair.replace("/", "")
         df = fetch_price_series(symbol, interval)
         rsi, macd = calculate_rsi_macd(df)
         strength, signal_icon = determine_signal_strength(rsi, macd)
         duration = get_trade_duration(strength)
-
         draw_candlestick_chart(df, filename="chart.png", pair=pair, tf=timeframe)
-
         with open("chart.png", "rb") as photo:
             await app.bot.send_photo(
                 chat_id=chat_id,
@@ -119,24 +114,21 @@ async def send_smart_signal(app, chat_id, pair, timeframe):
     except Exception as e:
         await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Ошибка анализа: {e}")
 
-
-async def auto_update_signals(app):
+async def auto_update_signals(application):
     while True:
         if not active_chats:
             await asyncio.sleep(60)
             continue
         for chat_id in active_chats:
-            await send_smart_signal(app, chat_id, "EUR/USD", "M1")
+            await send_smart_signal(application, chat_id, "EUR/USD", "M1")
             await asyncio.sleep(1)
         await asyncio.sleep(300)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [[pair] for pair in PAIRS]
-    await update.message.reply_text("👋 Привет! Выбери валютную пару:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("\ud83d\udc4b Привет! Выбери валютную пару:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     active_chats.add(update.effective_chat.id)
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -150,7 +142,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [["📊 Умный сигнал (RSI+MACD)"]]
         await update.message.reply_text(f"Выбран таймфрейм: {text}", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
         return
-    elif "📊" in text:
+    elif text in ["📊", "📊 Умный сигнал (RSI+MACD)"]:
         pair = context.user_data.get("pair")
         tf = context.user_data.get("tf")
         if pair and tf:
@@ -160,13 +152,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Выбери действие с клавиатуры.")
 
-
 @app_flask.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app().bot)
     telegram_app().update_queue.put_nowait(update)
     return "ok"
-
 
 def telegram_app():
     application = Application.builder().token(TOKEN).build()
@@ -174,22 +164,15 @@ def telegram_app():
     application.add_handler(MessageHandler(filters.TEXT, handle_message))
     return application
 
-
 async def run_bot():
     init_db()
-
-    if not WEBHOOK_URL:
-        raise RuntimeError("WEBHOOK_URL не задан. Укажи его в .env или Railway переменных.")
-
     app = telegram_app()
     asyncio.create_task(auto_update_signals(app))
-
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
         webhook_url=WEBHOOK_URL + "/webhook"
     )
-
 
 if __name__ == "__main__":
     asyncio.run(run_bot())

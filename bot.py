@@ -169,5 +169,16 @@ async def run_bot():
         webhook_url=WEBHOOK_URL + "/webhook"
     )
 
-if __name__ == '__main__':
-    asyncio.run(run_bot())
+if __name__ == "__main__":
+    import asyncio
+
+    try:
+        asyncio.run(run_bot())
+    except RuntimeError as e:
+        if str(e).startswith("Этот цикл событий уже запущен") or str(e).startswith("Cannot close a running event loop"):
+            loop = asyncio.get_event_loop()
+            loop.create_task(run_bot())
+            loop.run_forever()
+        else:
+            raise
+

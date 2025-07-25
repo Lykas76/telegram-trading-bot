@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_KEY") or "dc4ce2bd0a5e4865abcd294f28d55796"
+TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_API_KEY")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]
@@ -54,23 +55,32 @@ def get_trade_duration(strength: str) -> str:
 
 
 def fetch_price_series(symbol: str, interval: str, outputsize=50):
-    url = "https://api.twelvedata.com/time_series"
+    url = "https://www.alphavantage.co/query"
     params = {
-        "symbol": symbol,
+        "function": "FX_INTRADAY",
+        "from_symbol": symbol.split("/")[0],
+        "to_symbol": symbol.split("/")[1],
         "interval": interval,
-        "apikey": API_KEY,
-        "outputsize": outputsize,
-        "format": "JSON"
+        "apikey": ALPHA_VANTAGE_KEY,
+        "outputsize": "compact"
     }
     response = requests.get(url, params=params)
     data = response.json()
-    if "values" not in data:
-        raise Exception(data.get("message", "Ошибка получения данных"))
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.sort_values("datetime")
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
+
+    time_key = f"Time Series FX ({interval})"
+    if time_key not in data:
+        raise Exception(data.get("Note") or data.get("Error Message") or "Ошибка анализа: данные не получены")
+
+    df = pd.DataFrame.from_dict(data[time_key], orient="index")
+    df = df.rename(columns={
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close"
+    })
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    df = df.astype(float)
     return df
 
 

@@ -169,23 +169,10 @@ async def run_bot():
         webhook_url=WEBHOOK_URL + "/webhook"
     )
 
+import asyncio
+
 if __name__ == "__main__":
-    import asyncio
+    async def main():
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    try:
-        loop.run_until_complete(run_bot())
-    except RuntimeError as e:
-        if "already running" in str(e):
-            # Для среды вроде Jupyter или Railway fallback
-            asyncio.create_task(run_bot())
-            loop.run_forever()
-        else:
-            raise
 
 

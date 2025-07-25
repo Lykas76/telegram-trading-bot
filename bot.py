@@ -173,12 +173,19 @@ if __name__ == "__main__":
     import asyncio
 
     try:
-        asyncio.run(run_bot())
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(run_bot())
     except RuntimeError as e:
-        if str(e).startswith("Этот цикл событий уже запущен") or str(e).startswith("Cannot close a running event loop"):
-            loop = asyncio.get_event_loop()
-            loop.create_task(run_bot())
+        if "already running" in str(e):
+            # Для среды вроде Jupyter или Railway fallback
+            asyncio.create_task(run_bot())
             loop.run_forever()
         else:
             raise
+
 

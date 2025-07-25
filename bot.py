@@ -14,7 +14,7 @@ from datetime import datetime
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-API_KEY = os.getenv("API_KEY") or "dc4ce2bd0a5e4865abcd294f28d55796"
+API_KEY = os.getenv("API_KEY") or "TMNLROVN3BTDZUFS"
 
 PAIRS = ["EUR/USD", "GBP/USD", "AUD/JPY", "EUR/CAD"]
 TIMEFRAMES = ["M1", "M5", "M15"]

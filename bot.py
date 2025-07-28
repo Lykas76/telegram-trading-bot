@@ -1,21 +1,19 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime, timezone
-from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 import requests
+from datetime import datetime
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Загрузка переменных окружения
 load_dotenv()
-
-# 🔐 Получение ключей из Railway/переменных окружения
 TOKEN = os.getenv("TOKEN")
-TWELVE_DATA_KEY = os.getenv("API_KEY")  # Для обычных сигналов
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")  # Для умных сигналов (RSI + MACD)
+TWELVE_DATA_KEY = os.getenv("API_KEY")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Получение обычного сигнала (Twelve Data)
+# Получение обычного сигнала
 def get_basic_signal(pair: str, interval: str):
     try:
         symbol = pair.replace("/", "")
@@ -45,50 +43,80 @@ def get_basic_signal(pair: str, interval: str):
         data = response.json()
         if "values" not in data:
             raise ValueError("Ошибка анализа: данные не получены")
-        # Пример: просто направление (для теста)
         last_close = float(data["values"][0]["close"])
         prev_close = float(data["values"][1]["close"])
-        signal = "BUY" if last_close > prev_close else "SELL"
-        return signal
+        return "BUY" if last_close > prev_close else "SELL"
     except Exception as e:
         return f"Ошибка анализа: {str(e)}"
 
-# Получение умного сигнала (Alpha Vantage)
+# Получение умного сигнала (заглушка)
 def get_smart_signal(pair: str, interval: str):
     try:
         symbol = pair.replace("/", "")
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={interval}&apikey={ALPHA_VANTAGE_KEY}&datatype=json"
+        av_interval = "1min" if interval == "M1" else "5min" if interval == "M5" else "15min"
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={av_interval}&apikey={ALPHA_VANTAGE_KEY}"
         response = requests.get(url)
         data = response.json()
-        if "Time Series" not in str(data):
+        if not any(k.startswith("Time Series") for k in data):
             raise ValueError("Ошибка анализа: данные не получены")
-        # Простейший RSI+MACD можно вставить здесь (упрощён)
-        return "BUY"  # Заглушка
+        return "BUY"  # Заглушка. Здесь можно добавить RSI + MACD
     except Exception as e:
         return f"Ошибка анализа: {str(e)}"
 
-# Команды бота
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📡 Сигнал", callback_data="basic")],
-                [InlineKeyboardButton("📊 Умный сигнал (RSI+MACD)", callback_data="smart")]]
-    await update.message.reply_text("Выбери тип сигнала:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(pair, callback_data=f"pair_{pair}")] for pair in ["EUR/USD", "GBP/USD", "EUR/CAD", "AUD/JPY"]]
+    await update.message.reply_text("Выберите валютную пару:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработка выбора пары или таймфрейма или запроса сигнала
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    pair = "EUR/USD"
-    interval = "1min"  # M1
-    if query.data == "basic":
-        signal = get_basic_signal(pair, interval)
-        text = f"📡 Сигнал {pair} M1\n🟢 {signal}\n⏳ Время: 1–3 мин"
-    else:
-        signal = get_smart_signal(pair, interval)
-        text = f"📊 Умный сигнал (RSI+MACD)\n{signal}\n⏳ Время: 1–3 мин"
-    await query.edit_message_text(text)
 
+    data = query.data
+    if data.startswith("pair_"):
+        pair = data.split("_")[1]
+        context.user_data["pair"] = pair
+        keyboard = [[InlineKeyboardButton(tf, callback_data=f"tf_{tf}")] for tf in ["M1", "M5", "M15"]]
+        await query.edit_message_text(f"Вы выбрали пару: {pair}\nТеперь выберите таймфрейм:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("tf_"):
+        timeframe = data.split("_")[1]
+        context.user_data["timeframe"] = timeframe
+        keyboard = [
+            [InlineKeyboardButton("📡 Сигнал", callback_data="basic")],
+            [InlineKeyboardButton("📊 Умный сигнал (RSI+MACD)", callback_data="smart")]
+        ]
+        await query.edit_message_text(f"Пара: {context.user_data['pair']}\nТаймфрейм: {timeframe}\nВыберите тип сигнала:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data in ["basic", "smart"]:
+        pair = context.user_data.get("pair", "EUR/USD")
+        tf = context.user_data.get("timeframe", "M1")
+        interval = "1min" if tf == "M1" else "5min" if tf == "M5" else "15min"
+
+        if data == "basic":
+            signal = get_basic_signal(pair, interval)
+            signal_type = "Обычный"
+            text = f"📡 Сигнал {pair} {tf}\n🟢 {signal}\n⏳ Время: 1–3 мин"
+        else:
+            signal = get_smart_signal(pair, tf)
+            signal_type = "Умный (RSI+MACD)"
+            text = f"📊 Умный сигнал (RSI+MACD)\n{pair} {tf}\n📈 {signal}\n⏳ Время: 1–3 мин"
+
+        # Сохраняем в базу
+        conn = sqlite3.connect("signals.db")
+        c = conn.cursor()
+        c.execute("INSERT INTO signals (pair, timeframe, signal_type, signal, timestamp) VALUES (?, ?, ?, ?, ?)",
+                  (pair, tf, signal_type, signal, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text(text)
+
+# Запуск приложения
 if __name__ == "__main__":
     init_db()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_signal))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.run_polling()
